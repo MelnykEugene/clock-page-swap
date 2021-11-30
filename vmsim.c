@@ -5,8 +5,7 @@
  * Allocate space that is then virtually mapped, page by page, to a simulated underlying space.  Maintain page tables and follow
  * their mappings with a simulated MMU.
  **/
-// =================================================================================================================================
-
+// ================================================================================================================================
 
 
 // =================================================================================================================================
@@ -70,9 +69,25 @@ static vmsim_addr_t upper_pt       = 0;
 
 // Used by the heap allocator, the address of the next free simulated address.
 static vmsim_addr_t sim_free_addr  = 0;
+
+// Will be the list of all in-memory pages
+static pt_entry_t** pages = NULL;
+
+// possible number of current real pages
+static uint64_t number_of_entries = (DEFAULT_REAL_MEMORY_SIZE - PT_AREA_SIZE)/PAGESIZE;
+
+// "clock handle"
+static uint64_t current_page_number = 0;
+
+// number of next avaliable block on the backing store for pointer bumping
+static uint64_t next_block_number = 1;
+
 // =================================================================================================================================
 
-
+pt_entry_t*  find_lru();
+vmsim_addr_t send_to_back_and_give_address (pt_entry_t* entry_pointer);
+void         bring_back (vmsim_addr_t entry_address, vmsim_addr_t real_address);
+void         swap(vmsim_addr_t backing_store_address, pt_entry_t* real_page);
 
 // =================================================================================================================================
 /**
@@ -105,23 +120,25 @@ allocate_pt () {
  */
 vmsim_addr_t
 allocate_real_page () {
-
-  if (real_free_addr <= real_size) {
-    
+  //the original template for this function made no sense to me. I think it would fail assertions after free memory was all used for the first time. Rewrote the logic
+  
     vmsim_addr_t new_real_addr = real_free_addr;
     real_free_addr += PAGESIZE;
     assert(IS_ALIGNED(new_real_addr));
-    assert(real_free_addr <= real_size);
 
-  } else {
-
-    swap_out();
+  //if we are out of memory,swap
+  //Note that we never amend our changes to real_free_addr. In the absence of reclamation, this should be fine. Once we run out of memory, we stay out of memory.
+  if (real_free_addr > real_size) {
     
-  }
+    pt_entry_t* entry = find_lru();
+    vmsim_addr_t freed_address = send_to_back_and_give_address(entry);
+    return freed_address;
+
+  } 
+  //otherwise the address we obtained by bumping is good:
   
   void* new_real_ptr = (void*)(real_base + new_real_addr);
   memset(new_real_ptr, 0, PAGESIZE);
-
   return new_real_addr;
   
 } // allocate_real_page ()
@@ -157,6 +174,9 @@ vmsim_init () {
     mmu_init(upper_pt);
     bs_init();
     
+    //initialize the clock
+    number_of_entries = (real_size - PT_AREA_SIZE)/PAGESIZE;
+    pages = malloc(number_of_entries * sizeof(vmsim_addr_t));
   }
   
 } // vmsim_init ()
@@ -210,7 +230,6 @@ vmsim_map_fault (vmsim_addr_t sim_addr) {
     upper_pte = allocate_pt();
     assert(upper_pte != 0);
     vmsim_write_real(&upper_pte, upper_pte_addr, sizeof(upper_pte));
-    
   }
 
   // Grab the lower table's entry.
@@ -221,16 +240,18 @@ vmsim_map_fault (vmsim_addr_t sim_addr) {
   vmsim_read_real(&lower_pte, lower_pte_addr, sizeof(lower_pte));
 
   // If there is no mapped page, create it and update the lower table.
-  vmsim_addr_t free_real_page = allocate_real_page();
+  // we only allocate if there is no mapped page, else we handle this in swap
+  // I think i dublicated some logic somewhere. what can you do
+  // Update: Yeah, a neater way would be to hide this logic within allocate_real_page. This bleeds abstraction for no reason but I don't have time to rewrite.
   if (lower_pte == 0) {
-
-    lower_pte = free_real_page;
+    lower_pte = allocate_real_page();
     SET_RESIDENT(lower_pte);
     vmsim_write_real(&lower_pte, lower_pte_addr, sizeof(lower_pte));
 
   }  else if (!IS_RESIDENT(lower_pte)) {
 
-    
+    pt_entry_t* to_swap_out = find_lru();
+    swap(lower_pte_addr,to_swap_out);
     
   }
   
@@ -320,4 +341,120 @@ vmsim_free (vmsim_addr_t ptr) {
   // No relcamation, so nothing to do.
 
 } // vmsim_free ()
+// =================================================================================================================================
+
+
+
+
+
+
+
+
+// =================================================================================================================================
+pt_entry_t*
+find_lru(){
+
+  //get the clock handle
+  pt_entry_t current = *pages[current_page_number];
+
+  //go alongside the clock and set the visited pages as cold. Replace them as such in the real memory
+  while IS_REFERENCED(current){
+
+    //make a copy of the current address, but flagged cold
+    pt_entry_t current_cleared_copy = CLEAR_REFERENCED(current);
+
+    //vsvim_write_real wants an adress RELATIVE to the real_base
+    //!!!
+    vmsim_addr_t address_to_rewrite = (vmsim_addr_t)( (void*) pages[current_page_number] - real_base);
+
+    vmsim_write_real(&current_cleared_copy,address_to_rewrite,sizeof(pt_entry_t));
+
+    //iterate the clock
+    current_page_number = (current_page_number + 1)% number_of_entries;
+    current = *pages[current_page_number];
+  }
+  return pages[current_page_number];
+
+} // find_lru())
+// =================================================================================================================================
+
+
+
+
+
+
+
+
+// =================================================================================================================================
+void
+swap (vmsim_addr_t backing_store_address, pt_entry_t* real_page) {
+
+  vmsim_addr_t freed_page = send_to_back_and_give_address(real_page);
+
+  bring_back(backing_store_address, freed_page);
+
+} // swap ()
+// =================================================================================================================================
+
+
+
+
+
+
+
+
+
+
+// =================================================================================================================================
+//Given a (pointer to) LPT entry, send the contents to the back store and gives a real (FREE) address
+vmsim_addr_t send_to_back_and_give_address(pt_entry_t* entry_pointer){
+  
+  pt_entry_t entry = *entry_pointer;
+  vmsim_addr_t real_page_address_to_swap = GET_PAGE_ADDR(entry);
+  bs_write(real_page_address_to_swap,next_block_number);
+
+  //The UPPER bits of the new entry will correspond to the BLOCK NUMBER on the backing store
+  // 0x3ff = 2^10 in binary
+  CLEAR_RESIDENT(entry);
+  entry = (entry & 0x3ff) | (next_block_number << 10);
+
+  next_block_number+=1;
+
+  vmsim_addr_t address_to_rewrite = (vmsim_addr_t) ((void*) entry_pointer - real_base);
+  vmsim_write_real(&entry, address_to_rewrite, sizeof(pt_entry_t));
+
+  //at this point, the address we have is considered freed
+  return real_page_address_to_swap;
+
+}
+// =================================================================================================================================
+
+
+
+
+
+
+
+
+
+// =================================================================================================================================
+//copies contents of the backing store corresponding to entry_address to (hopefully) free real_address
+void bring_back(vmsim_addr_t entry_address, vmsim_addr_t real_address){
+
+  pt_entry_t entry;
+  vmsim_read_real(&entry,entry_address,sizeof(pt_entry_t));
+
+  //0xfffc00 in binary has lower ten bits zero and the rest 1
+  uint64_t block_number = (entry & 0xfffc00) >> 10;
+  bs_read(real_address,block_number);
+
+  //re-build entry
+  entry = (entry & 0x3ff) | real_address ;
+  SET_RESIDENT(entry);
+  vmsim_write_real(&entry,entry_address,sizeof(pt_entry_t));
+
+  //update our clock to include the newly fetched page
+  uint64_t page_number = (real_address- PT_AREA_SIZE)/PAGESIZE;
+  pages[page_number]= (pt_entry_t*) (real_base + entry_address);
+}
 // =================================================================================================================================
