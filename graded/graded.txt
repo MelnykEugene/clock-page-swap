@@ -1,0 +1,5 @@
+Grade: B+
+
+There's a lot of good here, but you make a mistake somewhere with
+entry_list, clobbering the header for malloc() on that object, and
+causing an assertion failure.

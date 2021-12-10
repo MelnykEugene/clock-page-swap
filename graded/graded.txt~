@@ -1,0 +1,9 @@
+Grade: B+
+
+There's a lot of good here, but for some reason, the test programs
+complete but silently produce no output.  The design needs a
+refactoring, which you note, and there's some excess bit manipulation
+that is not quite right but probably harmless.
+
+If you had left yourself a little more time, this would have been
+really good.

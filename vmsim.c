@@ -243,7 +243,8 @@ vmsim_map_fault (vmsim_addr_t sim_addr) {
   // we only allocate if there is no mapped page, else we handle this in swap
   // I think i dublicated some logic somewhere. what can you do
   // Update: Yeah, a neater way would be to hide this logic within allocate_real_page. This bleeds abstraction for no reason but I don't have time to rewrite.
-  if (lower_pte == 0) {
+  // SK: Agreed.  
+  if (lower_pte == 0) {    
     lower_pte = allocate_real_page();
     SET_RESIDENT(lower_pte);
     vmsim_write_real(&lower_pte, lower_pte_addr, sizeof(lower_pte));
@@ -444,11 +445,14 @@ void bring_back(vmsim_addr_t entry_address, vmsim_addr_t real_address){
   pt_entry_t entry;
   vmsim_read_real(&entry,entry_address,sizeof(pt_entry_t));
 
+  // SK: You're missing a couple of leading 'f' digits.
   //0xfffc00 in binary has lower ten bits zero and the rest 1
   uint64_t block_number = (entry & 0xfffc00) >> 10;
   bs_read(real_address,block_number);
 
   //re-build entry
+
+  // SK: Keeping the pre-existing lower 10 bits makes no sense.  
   entry = (entry & 0x3ff) | real_address ;
   SET_RESIDENT(entry);
   vmsim_write_real(&entry,entry_address,sizeof(pt_entry_t));
